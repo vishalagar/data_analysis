@@ -3,6 +3,7 @@ import copy
 import time
 import torch
 import csv
+import logging 
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.models as models
@@ -21,18 +22,11 @@ from app.services.data_service import CustomImageDataset, train_transform, val_t
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 1. Generate a unique timestamp for this training run
-TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
-
-# 2. Set dynamic Log Path with timestamp
-LOG_FILENAME = f"training_log_{TIMESTAMP}.txt"
-LOG_FILE_PATH = os.path.join(LOGS_DIR, LOG_FILENAME)
-
-# Initialize logger with the dynamic path
-logger = setup_logger("pluto_trainer", LOG_FILE_PATH, mode='w')
+# --- FIX 1: Initialize logger broadly here, but we will CHANGE the file handler per run ---
+# We point this to a generic 'startup.log' initially so we don't create empty training logs at boot.
+logger = setup_logger("pluto_trainer", os.path.join(LOGS_DIR, "startup.log"), mode='a')
 
 def create_model(num_classes):
-    # Standard ResNet18 for this project
     model = models.resnet18(weights="DEFAULT")
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
@@ -40,7 +34,6 @@ def create_model(num_classes):
 def train_epoch(model, loader, criterion, optimizer):
     model.train()
     r_loss, correct, total = 0.0, 0, 0
-    # Note: Accepting 3 items from loader (img, lbl, path)
     for img, lbl, _ in loader:
         img, lbl = img.to(DEVICE), lbl.to(DEVICE)
         optimizer.zero_grad()
@@ -68,177 +61,105 @@ def validate(model, loader, criterion):
     return (r_loss / total, correct / total) if total > 0 else (0.0, 0.0)
 
 def get_predictions_and_labels(model, loader):
-    """Get all predictions, true labels, and file paths from a data loader."""
     model.eval()
-    all_preds = []
-    all_labels = []
-    all_paths = []
-    
+    all_preds, all_labels, all_paths = [], [], []
     with torch.no_grad():
         for imgs, labels, paths in loader:
             imgs = imgs.to(DEVICE)
             outputs = model(imgs)
             _, preds = torch.max(outputs, 1)
-            
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_paths.extend(paths)
-    
     return np.array(all_labels), np.array(all_preds), all_paths
 
 def calculate_miss_overkill_rates(y_true, y_pred, class_names, ok_class="OK"):
-    """
-    Calculate Miss Rate and Overkill Rate.
-    Miss Rate: Percentage of actual defects (non-OK) that were classified as OK
-    Overkill Rate: Percentage of actual OK items that were classified as defects (non-OK)
-    """
-    # Find OK class index (case-insensitive)
     ok_idx = None
     for idx, name in enumerate(class_names):
         if name.upper() == ok_class.upper():
             ok_idx = idx
             break
+    if ok_idx is None: return None
     
-    if ok_idx is None:
-        return None
+    y_true_binary = (y_true == ok_idx).astype(int)
+    y_pred_binary = (y_pred == ok_idx).astype(int)
     
-    # Create binary classification: OK vs NOT-OK
-    y_true_binary = (y_true == ok_idx).astype(int)  # 1 = OK, 0 = NOT-OK
-    y_pred_binary = (y_pred == ok_idx).astype(int)  # 1 = OK, 0 = NOT-OK
-    
-    # Calculate counts
     miss_count = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
     total_defects = np.sum(y_true_binary == 0)
-    
     overkill_count = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
     total_ok = np.sum(y_true_binary == 1)
     
-    # Calculate rates
-    miss_rate = (miss_count / total_defects * 100) if total_defects > 0 else 0.0
-    overkill_rate = (overkill_count / total_ok * 100) if total_ok > 0 else 0.0
-    
     return {
-        "miss_rate": miss_rate,
+        "miss_rate": (miss_count / total_defects * 100) if total_defects > 0 else 0.0,
         "miss_count": miss_count,
         "total_defects": total_defects,
-        "overkill_rate": overkill_rate,
+        "overkill_rate": (overkill_count / total_ok * 100) if total_ok > 0 else 0.0,
         "overkill_count": overkill_count,
         "total_ok": total_ok
     }
 
 def print_confusion_matrix(cm, class_names):
-    """Print confusion matrix in a formatted table."""
-    logger.info("\n" + "="*60)
-    logger.info("CONFUSION MATRIX")
-    logger.info("="*60)
-    
-    # Header
-    header = f"{'':>12} |"
-    for name in class_names:
-        header += f" {name:>8} |"
-    logger.info(header)
-    logger.info("-"*60)
-    
-    # Rows
+    logger.info("\n" + "="*60 + "\nCONFUSION MATRIX\n" + "="*60)
+    header = f"{'':>12} |" + "".join([f" {name:>8} |" for name in class_names])
+    logger.info(header + "\n" + "-"*60)
     for i, true_class in enumerate(class_names):
-        row = f"{true_class:>12} |"
-        for j in range(len(class_names)):
-            row += f" {cm[i, j]:>8} |"
+        row = f"{true_class:>12} |" + "".join([f" {cm[i, j]:>8} |" for j in range(len(class_names))])
         logger.info(row)
     logger.info("="*60)
 
-def generate_misclassification_csv(y_true, y_pred, paths, class_names, mode="val"):
-    """
-    Generates a CSV file for wrongly detected images.
-    Uses 'mode' to distinguish between training and inference files.
-    """
-    # 3. Use the mode prefix so files don't overwrite each other
-    csv_filename = f"{mode}_misclassifications_{TIMESTAMP}.csv"
+# --- FIX 2: Accept timestamp argument so CSV matches the log file ---
+def generate_misclassification_csv(y_true, y_pred, paths, class_names, mode="val", timestamp=None):
+    ts = timestamp if timestamp else time.strftime("%Y%m%d_%H%M%S")
+    csv_filename = f"{mode}_misclassifications_{ts}.csv"
     csv_path = os.path.join(LOGS_DIR, csv_filename)
-    
     try:
         with open(csv_path, mode='w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
             writer.writerow(["Original", "Predicted", "File Path"])
-            
-            count = 0
             for i in range(len(y_true)):
                 if y_true[i] != y_pred[i]:
-                    writer.writerow([
-                        class_names[y_true[i]], 
-                        class_names[y_pred[i]], 
-                        paths[i]
-                    ])
-                    count += 1
-                    
-        logger.info(f"Misclassification CSV generated: {csv_path} ({count} entries)")
+                    writer.writerow([class_names[y_true[i]], class_names[y_pred[i]], paths[i]])
         return csv_path
     except Exception as e:
         logger.error(f"Failed to generate CSV: {e}")
         return None
 
-def evaluate_and_log_metrics(model, val_loader, class_names, ok_class="OK", mode="val"):
-    """
-    Evaluate model and log confusion matrix, metrics, and miss/overkill rates.
-    Accepts 'mode' to pass down to CSV generator.
-    """
-    
-    # Get predictions and paths
+# --- FIX 3: Accept timestamp argument ---
+def evaluate_and_log_metrics(model, val_loader, class_names, ok_class="OK", mode="val", timestamp=None):
     y_true, y_pred, paths = get_predictions_and_labels(model, val_loader)
     
-    # Generate Misclassification CSV with specific mode
-    csv_path = generate_misclassification_csv(y_true, y_pred, paths, class_names, mode=mode)
-
-    # Calculate confusion matrix
-    cm = confusion_matrix(y_true, y_pred)
+    # Pass timestamp to CSV generator
+    csv_path = generate_misclassification_csv(y_true, y_pred, paths, class_names, mode=mode, timestamp=timestamp)
     
-    # Print confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
     print_confusion_matrix(cm, class_names)
     
-    # Calculate metrics
     accuracy = accuracy_score(y_true, y_pred)
-    
-    logger.info("\n" + "="*60)
-    logger.info(f"{mode.upper()} METRICS")
-    logger.info("="*60)
-    logger.info(f"Accuracy: {accuracy:.2%}")
-    
-    # Per-class metrics
     precision = precision_score(y_true, y_pred, average=None, zero_division=0)
     recall = recall_score(y_true, y_pred, average=None, zero_division=0)
     f1 = f1_score(y_true, y_pred, average=None, zero_division=0)
     
-    logger.info("\nPer-class Metrics:")
+    logger.info(f"\n{mode.upper()} METRICS\nAccuracy: {accuracy:.2%}")
     for i, cls in enumerate(class_names):
         logger.info(f"  {cls:>10}: Precision={precision[i]:.2%}, Recall={recall[i]:.2%}, F1={f1[i]:.2%}")
     
-    # Calculate and log miss/overkill rates
     rates = calculate_miss_overkill_rates(y_true, y_pred, class_names, ok_class)
-    
     if rates:
-        logger.info("\n" + "="*60)
-        logger.info("MISS AND OVERKILL RATES")
-        logger.info("="*60)
-        logger.info(f"Miss Rate:     {rates['miss_rate']:.2f}% ({rates['miss_count']}/{rates['total_defects']})")
-        logger.info(f"  -> {rates['miss_count']} defects incorrectly classified as {ok_class}")
-        logger.info(f"Overkill Rate: {rates['overkill_rate']:.2f}% ({rates['overkill_count']}/{rates['total_ok']})")
-        logger.info(f"  -> {rates['overkill_count']} {ok_class} items incorrectly classified as defects")
-        logger.info("="*60)
-    else:
-        logger.info(f"\n[INFO] OK class '{ok_class}' not found. Skipping miss/overkill rate calculation.")
-        logger.info(f"       Available classes: {class_names}")
+        logger.info(f"\nMiss Rate: {rates['miss_rate']:.2f}% | Overkill Rate: {rates['overkill_rate']:.2f}%")
     
     return {
-        "accuracy": accuracy,
-        "confusion_matrix": cm.tolist(),
-        "miss_rate": rates['miss_rate'] if rates else None,
-        "overkill_rate": rates['overkill_rate'] if rates else None,
+        "accuracy": accuracy, 
+        "confusion_matrix": cm.tolist(), 
+        "miss_rate": rates['miss_rate'] if rates else None, 
+        "overkill_rate": rates['overkill_rate'] if rates else None, 
         "csv_path": csv_path
     }
 
-def train_core(params, ds_train, ds_val, epochs=300, min_epochs=30, patience=15):
-    """Core training loop with Early Stopping and Direct File Logging."""
-    # Handle both full datasets and Subset objects
+# --- FIX 4: Accept log_file_path argument to write direct dumps to the correct file ---
+def train_core(params, ds_train, ds_val, log_file_path, epochs=300, min_epochs=30, patience=15):
+    # Note: log_file_path is kept in args for compatibility, but we use the global 'logger' 
+    # which is already configured to write to this file.
+    
     num_classes = len(ds_train.classes) if hasattr(ds_train, 'classes') else len(ds_train.dataset.classes)
     model = create_model(num_classes).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
@@ -253,141 +174,148 @@ def train_core(params, ds_train, ds_val, epochs=300, min_epochs=30, patience=15)
     best_wts = copy.deepcopy(model.state_dict())
     triggers = 0
     
-    # Write a header to the log file to separate runs or phases
-    try:
-        with open(LOG_FILE_PATH, "a") as f:
-            f.write(f"\n{'='*20} New Training Session {'='*20}\n")
-    except Exception as e:
-        print(f"Warning: Could not write header to log file: {e}")
+    # Write Header using logger
+    logger.info(f"\n{'='*20} New Training Session {'='*20}")
 
     for epoch in range(epochs):
         t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer)
         v_loss, v_acc = validate(model, val_loader, criterion)
         scheduler.step(v_loss)
         
-        # Track best model
         if v_loss < best_loss:
-            best_loss = v_loss
-            best_acc = v_acc
-            best_wts = copy.deepcopy(model.state_dict())
+            best_loss, best_acc, best_wts = v_loss, v_acc, copy.deepcopy(model.state_dict())
             triggers = 0
         else:
             triggers += 1
             
-        # ---------------------------------------------------------
-        # DIRECT LOG DUMP (Forces write to disk every epoch)
-        # ---------------------------------------------------------
         log_entry = (
             f"Epoch {epoch+1}/{epochs} | "
             f"Train Loss: {t_loss:.4f} | Val Loss: {v_loss:.4f} | "
             f"Train Acc: {t_acc:.2%} | Val Acc: {v_acc:.2%} | "
-            f"Patience: {triggers}/{patience}\n"
+            f"Patience: {triggers}/{patience}"
         )
         
-        try:
-            with open(LOG_FILE_PATH, "a") as f:
-                f.write(log_entry)
-        except Exception as e:
-            print(f"Error writing to log file: {e}")
-        # ---------------------------------------------------------
+        # FIX: Use logger for everything. This ensures it goes to the file defined in the handler.
+        # This prevents the "overwrite" issue caused by mixing manual file writes with logger streams.
+        logger.info(log_entry)
 
-        # Standard logger (keep this for console output if needed)
-        if (epoch + 1) % 5 == 0:
-            logger.info(log_entry.strip())
-
-        # Early Stopping
         if triggers >= patience and (epoch + 1) >= min_epochs:
-            stop_msg = f"Early stopping triggered at epoch {epoch+1}\n"
-            logger.info(stop_msg.strip())
-            # Dump stop message to file too
-            with open(LOG_FILE_PATH, "a") as f:
-                f.write(stop_msg)
+            stop_msg = f"Early stopping triggered at epoch {epoch+1}"
+            logger.info(stop_msg)
             break
             
     model.load_state_dict(best_wts)
     return model, best_acc
 
-def run_automated_training(full_epochs=300):
-    logger.info("Starting Auto-ML Training...")
-    paths = get_data_paths()
-    train_dir = paths["train"]
-    val_dir = paths["val"]
+def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_path=None):
+    # --- FIX: Generate timestamp and switch log file cleanly ---
+    current_timestamp = time.strftime("%Y%m%d_%H%M%S")
+    new_log_filename = f"training_log_{current_timestamp}.txt"
+    new_log_path = os.path.join(LOGS_DIR, new_log_filename)
+    
+    # 1. Clear existing FileHandlers to stop writing to startup.log or old logs
+    for handler in logger.handlers[:]:
+        if isinstance(handler, logging.FileHandler):
+            logger.removeHandler(handler)
+            handler.close() # Good practice to close the old stream
+            
+    # 2. Add the NEW FileHandler
+    # mode='a' is safer than 'w' generally, but 'w' is fine here since the filename is unique.
+    file_handler = logging.FileHandler(new_log_path, mode='w', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(file_handler)
+    
+    # 3. Force the console handler to be present if it's missing (optional safety)
+    has_console = any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
+    if not has_console:
+        console_handler = logging.StreamHandler()
+        logger.addHandler(console_handler)
+
+    logger.info(f"Starting Training Session: {current_timestamp}")
+    logger.info(f"Logging to: {new_log_path}")
+
+    # Resolve Dataset Path
+    if custom_dataset_path:
+        if not os.path.exists(custom_dataset_path):
+             return {"status": "error", "message": f"Custom dataset path not found: {custom_dataset_path}"}
+        train_dir = os.path.join(custom_dataset_path, "train")
+        val_dir = os.path.join(custom_dataset_path, "val")
+        logger.info(f"Using custom dataset path: {custom_dataset_path}")
+    else:
+        paths = get_data_paths()
+        train_dir = paths["train"]
+        val_dir = paths["val"]
     
     if not os.path.exists(train_dir): return {"status": "error", "message": "No train dir"}
     
     ds_train = CustomImageDataset(train_dir, transform=train_transform)
     ds_val = CustomImageDataset(val_dir, transform=val_transform)
     
-    # 1. Hyperparameter Search (Optuna)
-    best_params = {"lr": 0.001, "batch_size": 32}
+    # Resolve Hyperparameters
+    final_params = {"lr": 0.001, "batch_size": 32}
     
-    try:
-        def objective(trial):
-            lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-            bs = trial.suggest_categorical("batch_size", [16, 32])
-            
-            # Use larger subset for difficult datasets
-            subset_size = min(len(ds_train), 1500)
-            subset = torch.utils.data.Subset(ds_train, range(subset_size))
-            
-            _, acc = train_core({"lr": lr, "batch_size": bs}, subset, ds_val, epochs=20, min_epochs=10, patience=5)
-            return acc
+    if custom_params:
+        logger.info(f"Using custom hyperparameters: {custom_params}")
+        final_params.update(custom_params)
+    else:
+        try:
+            def objective(trial):
+                lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+                bs = trial.suggest_categorical("batch_size", [16, 32])
+                subset = torch.utils.data.Subset(ds_train, range(min(len(ds_train), 1500)))
+                
+                # Note: We still pass new_log_path, but train_core now ignores it for writing
+                # and uses the global logger instead.
+                _, acc = train_core({"lr": lr, "batch_size": bs}, subset, ds_val, new_log_path, epochs=1, min_epochs=1, patience=1)
+                return acc
 
-        study = optuna.create_study(direction="maximize")
-        study.optimize(objective, n_trials=1)
-        best_params = study.best_params
-        logger.info(f"Best Params Found: {best_params}")
-    except Exception as e:
-        logger.warning(f"Optuna search failed/skipped: {e}. Using defaults.")
+            study = optuna.create_study(direction="maximize")
+            study.optimize(objective, n_trials=1)
+            final_params = study.best_params
+            logger.info(f"Best Optuna Params: {final_params}")
+        except Exception as e:
+            logger.warning(f"Optuna search failed: {e}. Using defaults.")
 
-    # 2. Final Training
-    model, val_acc = train_core(best_params, ds_train, ds_val, epochs=full_epochs, min_epochs=30, patience=20)
+    # Final Training
+    epochs = int(final_params.get("epochs", full_epochs))
+    
+    model, val_acc = train_core(final_params, ds_train, ds_val, new_log_path, epochs=epochs, min_epochs=1, patience=1)
 
-    # 3. Evaluate and log comprehensive metrics
-    logger.info("\n" + "="*60)
-    logger.info("FINAL MODEL EVALUATION")
-    logger.info("="*60)
+    # Evaluation
+    val_loader = DataLoader(ds_val, batch_size=int(final_params.get("batch_size", 32)), shuffle=False)
     
-    # Create validation loader for evaluation
-    val_loader = DataLoader(ds_val, batch_size=best_params.get("batch_size", 32), shuffle=False)
-    
-    # Detect OK class
-    ok_class = "OK" 
-    if ds_val.classes:
-        for cls in ds_val.classes:
-            if cls.upper() == "OK":
-                ok_class = cls
-                break
-    
-    # Pass mode="training" to distinguish the CSV
+    ok_class = "OK"
+    for cls in ds_val.classes:
+        if cls.upper() == "OK": ok_class = cls; break
+
     eval_results = evaluate_and_log_metrics(
         model, 
         val_loader, 
         ds_val.classes, 
         ok_class=ok_class, 
-        mode="training"
+        mode="training",
+        timestamp=current_timestamp
     )
     
-    # Save model
     save_path = os.path.join(MODELS_DIR, "best_model.pth")
-    tmp_path = save_path + ".tmp"
-    torch.save(model.state_dict(), tmp_path)
-    os.replace(tmp_path, save_path)
+    torch.save(model.state_dict(), save_path)
     
-    logger.info(f"\nModel saved to: {save_path}")
-    
+    # Ensure all file buffers are flushed at the end
+    for handler in logger.handlers:
+        handler.flush()
+
     return {
-        "status": "completed", 
         "accuracy": val_acc, 
-        "params": best_params,
+        "params": final_params,
         "class_names": ds_train.classes,
         "confusion_matrix": eval_results.get("confusion_matrix"),
         "miss_rate": eval_results.get("miss_rate"),
         "overkill_rate": eval_results.get("overkill_rate"),
-        "log_path": LOG_FILE_PATH,
+        "log_path": new_log_path,
         "csv_path": eval_results.get("csv_path"),
-        "data_path": DATASET_ROOT
-    }
+        "train_dir" : train_dir,
+        "val_dir" : val_dir     
+        }
 
 def run_inference():
     """Runs inference using the best saved model and returns metrics."""

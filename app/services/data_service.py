@@ -76,13 +76,40 @@ class CustomImageDataset(Dataset if HAS_TORCH else object):
 def get_dataset_stats():
     paths = get_data_paths()
     stats = {}
-    for split, key in [("train", "train"), ("val", "val")]:
+    
+    # Loop through train, val, AND test (added 'test')
+    for split, key in [("train", "train"), ("val", "val"), ("test", "test")]:
         path = paths[key]
+        
+        # Default empty state if folder doesn't exist
         if not os.path.exists(path):
-             stats[split] = {"count": 0}
+             stats[split] = {"count": 0, "breakdown": {}}
              continue
-        count = sum([len(files) for r, d, files in os.walk(path)])
-        stats[split] = {"count": count}
+        
+        # 1. Total Count (Recursive count of all files)
+        total_count = sum([len(files) for r, d, files in os.walk(path)])
+        
+        # 2. Per-Class Breakdown
+        breakdown = {}
+        try:
+            # Identify classes by looking for subdirectories
+            if os.path.isdir(path):
+                classes = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+                
+                for cls in classes:
+                    cls_path = os.path.join(path, cls)
+                    # Count files recursively within this specific class folder
+                    cls_count = sum([len(files) for r, d, files in os.walk(cls_path)])
+                    breakdown[cls] = cls_count
+        except Exception as e:
+            # If directory access fails, just leave breakdown empty
+            pass
+
+        stats[split] = {
+            "count": total_count,
+            "breakdown": breakdown
+        }
+        
     return stats
 
 # --- Minimal Detection Logic ---

@@ -134,7 +134,7 @@ def detect_issues_in_split(split, path):
     probs = cross_val_predict(LogisticRegression(max_iter=500), feats, np.array(ds.labels), cv=3, method="predict_proba")
     
     try:
-        issues_idx = find_label_issues(labels=ds.labels, pred_probs=probs, return_indices_ranked_by="self_confidence")
+        issues_idx = find_label_issues(labels=ds.labels, pred_probs=probs, return_indices_ranked_by="self_confidence", n_jobs=1)
     except: return []
 
     return [{
@@ -175,7 +175,7 @@ def detect_issues_with_model(model_path, split, path):
     probs_final = 0.85 * probs_model + 0.15 * probs_logreg
 
     try:
-        issues_idx = find_label_issues(labels=ds.labels, pred_probs=probs_final, return_indices_ranked_by="self_confidence")
+        issues_idx = find_label_issues(labels=ds.labels, pred_probs=probs_final, return_indices_ranked_by="self_confidence", n_jobs=1)
     except: return []
 
     return [{

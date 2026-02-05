@@ -193,14 +193,27 @@ def detect_issues():
             
     return {"issues": issues}
 
-def apply_fix(path, action, label=None):
-    if not os.path.exists(path): return False, "Not found"
+def apply_fix(path, label=None):
+    if not os.path.exists(path): 
+        return False, "File not found"
+    
     try:
-        if action == 'delete':
-            os.remove(path)
-        elif action == 'move' and label:
-            dest = os.path.join(os.path.dirname(os.path.dirname(path)), label, os.path.basename(path))
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.move(path, dest)
-        return True, "Done"
-    except Exception as e: return False, str(e)
+        # 1. Determine directories
+        # Go up 2 levels: dataset/train/OLD_LABEL -> dataset/train
+        base_dir = os.path.dirname(os.path.dirname(path))
+        
+        # Target folder: dataset/train/NONE
+        dest_dir = os.path.join(base_dir, label)
+        
+        # Target file: dataset/train/NONE/image.jpg
+        dest_path = os.path.join(dest_dir, os.path.basename(path))
+        
+        # 2. Create the destination folder if it doesn't exist
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        # 3. Move the file
+        shutil.move(path, dest_path)
+        return True, f"Moved to {label}"
+
+    except Exception as e: 
+        return False, str(e)

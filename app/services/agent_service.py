@@ -15,12 +15,13 @@ def analyze_situation_and_decide():
     detection_results = detect_issues()
     issues = detection_results.get("issues", [])
     
+    
     # 3. Return Context for n8n
     return {
         "status": "analysis_completed",
         "dataset_summary": stats,
         "total_issues_found": len(issues),
-        "issues_preview": issues[:5],  # Send first 5 issues for context if needed
+        # "issues_preview": issues[:5],  # Send first 5 issues for context if needed
         "all_issues": issues           # Full list required if n8n wants to fix them immediately
     }
 

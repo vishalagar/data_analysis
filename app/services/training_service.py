@@ -102,31 +102,8 @@ def parse_status_log(log_path):
 def parse_confusion_matrix_file(file_path):
     """
     Parses ConfMatrixTest.txt or ConfMatrixEval.txt.
-    Look for specific lines to parse Miss Rate and Overkill Rate if available, 
-    or parse the matrix table itself.
-    User provided:
-    OK, 112, 91, 21, 81.2500, 18.7500 
-    None, 66, 48, 18, 72.7273, 27.2727 
-    ReTest, 43, 19, 24, 44.1860, 55.8140 
-    Sum, 221, 158, 63, 71.4932, 28.5068
-    
-    We need to extract 81.2500 (Accuracy?) and 18.7500 (Miss Rate for OK?).
-    Actually user said: "Miss and overkill rate... data"
-    Let's look at the "Sum" line or individual class lines.
-    Usually: 
-    OK class -> Miss Rate = (False Negative / Total OK)
-    Other class -> Overkill Rate = (False Positive / Total Other)
-    
-    But let's look at the user example for ConfMatrixTest.txt:
-    Confusion Matrix :
-         OK     None     ReTest     Unknown
-    OK     91     15     6     0     
-    None     13     48     5     0     
-    ReTest     18     6     19     0    
-
-    OK, 112, 91, 21, 81.2500, 18.7500  <-- Total, Correct, Incorrect, Acc?, Miss?
-    
-    Let's assume the CSV-like part at the bottom has the rates.
+    Calculates Miss Rate and Overkill Rate using OK class as good and other classes as not good.
+    Ignores Unknown class in calculations.
     """
     if not os.path.exists(file_path):
         logger.warning(f"Confusion matrix file not found: {file_path}")
@@ -138,17 +115,99 @@ def parse_confusion_matrix_file(file_path):
     try:
         with open(file_path, 'r') as f:
             lines = f.readlines()
+
+        # --- 1. Calculate Miss/Overkill from Matrix Table ---
+        miss_count = 0
+        total_defects = 0
+        overkill_count = 0
+        total_ok = 0
+        
+        matrix_start_idx = -1
+        for i, line in enumerate(lines):
+            if "Confusion Matrix :" in line:
+                matrix_start_idx = i
+                break
+        
+        if matrix_start_idx != -1 and matrix_start_idx + 1 < len(lines):
+            # Parse Header
+            header_line = lines[matrix_start_idx + 1]
+            headers = [h.strip() for h in header_line.split() if h.strip()]
             
-        # Parse the CSV-like section at the end
-        # Format seems to be: ClassName, Total, Correct, Incorrect, Accuracy, ErrorRate?
+            ok_col_idx = -1
+            unknown_col_idx = -1
+            
+            for idx, h in enumerate(headers):
+                if h.lower() == "ok":
+                    ok_col_idx = idx
+                elif h.lower() == "unknown":
+                    unknown_col_idx = idx
+            
+            if ok_col_idx != -1:
+                # Parse Rows
+                current_idx = matrix_start_idx + 2
+                while current_idx < len(lines):
+                    line = lines[current_idx].strip()
+                    if not line or "," in line: # End of matrix or start of CSV section
+                        break
+                        
+                    parts = [p.strip() for p in line.split() if p.strip()]
+                    if not parts:
+                        current_idx += 1
+                        continue
+                        
+                    row_label = parts[0]
+                    # Parse counts - skip label
+                    try:
+                        counts = [int(x) for x in parts[1:]]
+                    except ValueError:
+                        current_idx += 1 # unexpected format
+                        continue
+
+                    # Ignore Unknown Row
+                    if row_label.lower() == "unknown":
+                        current_idx += 1
+                        continue
+                        
+                    # Calculate row totals excluding Unknown column predictions
+                    row_total = sum(counts)
+                    unknown_pred_count = 0
+                    if unknown_col_idx != -1 and unknown_col_idx < len(counts):
+                        unknown_pred_count = counts[unknown_col_idx]
+                    
+                    valid_row_total = row_total - unknown_pred_count
+                    
+                    if row_label.lower() == "ok":
+                        # Valid Good Class
+                        # Overkill = Good predicted as Defect (Predicted != OK and != Unknown)
+                        pred_ok_count = counts[ok_col_idx] if ok_col_idx < len(counts) else 0
+                        
+                        # Overkill count = Total Valid - Predicted OK
+                        # (Anything not OK and not Unknown is a Defect prediction)
+                        row_overkill = valid_row_total - pred_ok_count
+                        
+                        overkill_count += row_overkill
+                        total_ok += valid_row_total
+                    else:
+                        # Valid Defect Class (None, ReTest, etc)
+                        # Miss = Defect predicted as OK
+                        pred_ok_count = counts[ok_col_idx] if ok_col_idx < len(counts) else 0
+                        
+                        miss_count += pred_ok_count
+                        total_defects += valid_row_total
+                        
+                    current_idx += 1
+
+        # Calculate Rates
+        miss_rate = (miss_count / total_defects * 100.0) if total_defects > 0 else 0.0
+        overkill_rate = (overkill_count / total_ok * 100.0) if total_ok > 0 else 0.0
+
+        # --- 2. Parse CSV-like Section ---
         for line in lines:
             parts = line.strip().split(',')
             if len(parts) >= 6:
                 try:
-                    # Check for "Sum" line
                     row_label = parts[0].strip()
                     
-                    # IGNORE Unknown class
                     if row_label.lower() == "unknown":
                         continue
                         
@@ -161,11 +220,14 @@ def parse_confusion_matrix_file(file_path):
                     }
                     if row_label.lower() == "sum":
                         total_metrics = metrics
+                        # Inject calculated rates
+                        total_metrics["miss_rate"] = miss_rate
+                        total_metrics["overkill_rate"] = overkill_rate
                     else:
                         results[row_label] = metrics
                 except ValueError:
-                    continue # Header or malformed line
-                    
+                    continue 
+
     except Exception as e:
         logger.error(f"Error parsing confusion matrix file: {e}")
         return None

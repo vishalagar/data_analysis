@@ -18,7 +18,7 @@ except ImportError:
 
 from app.config import (
     MODELS_DIR, LOGS_DIR, get_data_paths, DATASET_ROOT,
-    DL_PROCESS_WRAPPER_PATH, TRAINING_JSON_PATH, EVALUATION_JSON_PATH, 
+    DL_PROCESS_WRAPPER_PATH, TRAINING_JSON_PATH, EVALUATION_JSON_PATH, TESTING_JSON_PATH,
     STATUS_FILE_PATH, MODEL_CONFIG_DIR, BASE_DIR
 )
 from app.logger_config import setup_logger
@@ -171,7 +171,30 @@ def scan_dataset_and_update_configs():
     # 5. Update Testing.json
     # Create it if it doesn't exist? Or only update if exists?
     # Uses TESTING_JSON_PATH
-    target_test_json = TESTING_JSON_PATH
+            
+    # 5. Update Testing.json
+    # Logic: Read SolutionDir and ModelName from Training.json to find the REAL Testing.json path
+    target_test_json = TESTING_JSON_PATH # Fallback
+    
+    try:
+        if os.path.exists(TRAINING_JSON_PATH):
+            with open(TRAINING_JSON_PATH, 'r') as f:
+                t_data = json.load(f)
+                
+            model_info = t_data.get("Model", {})
+            sol_dir = model_info.get("SolutionDir")
+            model_name = model_info.get("name", "Model_1")
+            
+            if sol_dir:
+                # Construct path: SolutionDir/Test/ModelName/Testing.json
+                test_dir_real = os.path.join(sol_dir, "Test", model_name)
+                os.makedirs(test_dir_real, exist_ok=True)
+                target_test_json = os.path.join(test_dir_real, "Testing.json")
+                logger.info(f"Resolved real Testing.json path: {target_test_json}")
+    except Exception as e:
+        logger.warning(f"Failed to resolve real Testing.json path, using fallback: {e}")
+
+    # Create it if it doesn't exist? Or only update if exists?
     if not os.path.exists(target_test_json) and os.path.exists(TRAINING_JSON_PATH):
          # Create from template if missing
          shutil.copy(TRAINING_JSON_PATH, target_test_json)

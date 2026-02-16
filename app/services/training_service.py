@@ -154,16 +154,12 @@ def scan_dataset_and_update_configs():
             t_data["trainImglst"] = train_imgs
             t_data["ValImgList"] = val_imgs
             
-            # Update Model counts & PATHS to be portable
+            # Update Model counts
             if "Model" in t_data:
                 t_data["Model"]["iTrainImgCount"] = len(train_imgs)
                 t_data["Model"]["iValidationImgCount"] = len(val_imgs)
                 t_data["Model"]["iTotalClasses"] = len(classes)
-                
-                # --- FIX: Ensure Paths are valid for this machine ---
-                t_data["Model"]["SolutionDir"] = str(MODELS_DIR)
-                t_data["Model"]["JsonDir"] = "Model_1" # Corresponds to app/models/Model_1/
-                t_data["Model"]["tfrec_lmdb_path"] = str(DATASET_ROOT).replace("\\", "/") # TF likes unix style sometimes?
+                # t_data["Model"]["bIsValPresent"] = len(val_imgs) > 0 # Keep existing logic or force true?
                 
             with open(TRAINING_JSON_PATH, 'w') as f:
                 json.dump(t_data, f, indent=2)
@@ -192,9 +188,6 @@ def scan_dataset_and_update_configs():
             if "Model" in test_data:
                  test_data["Model"]["iTestImgCount"] = len(test_imgs)
                  test_data["Model"]["iTotalClasses"] = len(classes)
-                 # Sync paths here too just in case
-                 test_data["Model"]["SolutionDir"] = str(MODELS_DIR)
-                 test_data["Model"]["JsonDir"] = "Model_1"
             
             with open(target_test_json, 'w') as f:
                 json.dump(test_data, f, indent=2)

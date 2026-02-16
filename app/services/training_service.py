@@ -35,11 +35,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # We point this to a generic 'startup.log' initially so we don't create empty training logs at boot.
 logger = setup_logger("pluto_trainer", os.path.join(LOGS_DIR, "startup.log"), mode='a')
 
-from app.config import (
-    MODELS_DIR, LOGS_DIR, get_data_paths, DATASET_ROOT,
-    DL_PROCESS_WRAPPER_PATH, TRAINING_JSON_PATH, EVALUATION_JSON_PATH, TESTING_JSON_PATH, 
-    STATUS_FILE_PATH, MODEL_CONFIG_DIR, BASE_DIR
-)
+
 
 # --- Dataset Scanning & JSON Update Logic ---
 def scan_dataset_and_update_configs():
@@ -107,6 +103,7 @@ def scan_dataset_and_update_configs():
             "classBinName": bin_name
         })
         
+
     # 3. Helper to scan images
     def scan_images(directory, dataset_id=1):
         img_list = []
@@ -157,12 +154,16 @@ def scan_dataset_and_update_configs():
             t_data["trainImglst"] = train_imgs
             t_data["ValImgList"] = val_imgs
             
-            # Update Model counts
+            # Update Model counts & PATHS to be portable
             if "Model" in t_data:
                 t_data["Model"]["iTrainImgCount"] = len(train_imgs)
                 t_data["Model"]["iValidationImgCount"] = len(val_imgs)
                 t_data["Model"]["iTotalClasses"] = len(classes)
-                # t_data["Model"]["bIsValPresent"] = len(val_imgs) > 0 # Keep existing logic or force true?
+                
+                # --- FIX: Ensure Paths are valid for this machine ---
+                t_data["Model"]["SolutionDir"] = str(MODELS_DIR)
+                t_data["Model"]["JsonDir"] = "Model_1" # Corresponds to app/models/Model_1/
+                t_data["Model"]["tfrec_lmdb_path"] = str(DATASET_ROOT).replace("\\", "/") # TF likes unix style sometimes?
                 
             with open(TRAINING_JSON_PATH, 'w') as f:
                 json.dump(t_data, f, indent=2)
@@ -173,7 +174,7 @@ def scan_dataset_and_update_configs():
             
     # 5. Update Testing.json
     # Create it if it doesn't exist? Or only update if exists?
-    # User said "Testing.json with testImglst", implied it exists or should act like Training.json
+    # Uses TESTING_JSON_PATH
     target_test_json = TESTING_JSON_PATH
     if not os.path.exists(target_test_json) and os.path.exists(TRAINING_JSON_PATH):
          # Create from template if missing
@@ -191,6 +192,9 @@ def scan_dataset_and_update_configs():
             if "Model" in test_data:
                  test_data["Model"]["iTestImgCount"] = len(test_imgs)
                  test_data["Model"]["iTotalClasses"] = len(classes)
+                 # Sync paths here too just in case
+                 test_data["Model"]["SolutionDir"] = str(MODELS_DIR)
+                 test_data["Model"]["JsonDir"] = "Model_1"
             
             with open(target_test_json, 'w') as f:
                 json.dump(test_data, f, indent=2)
@@ -610,16 +614,22 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     # 7. Run Testing - ONLY after Eval success
     # We need to read the model name from Training.json to know the test directory
     model_name = "Model_1" # Default
+    solution_dir = str(MODELS_DIR) # Safe default
+    
     try:
         with open(training_json, 'r') as f:
             d = json.load(f)
-            if "Model" in d and "name" in d["Model"]:
-                model_name = d["Model"]["name"]
+            if "Model" in d:
+                 if "name" in d["Model"]:
+                     model_name = d["Model"]["name"]
+                 if "SolutionDir" in d["Model"]:
+                     solution_dir = d["Model"]["SolutionDir"]
     except:
-        pass
+        logger.warning("Failed to parse Training.json for Test dir path. Using defaults.")
 
-    test_dir = os.path.join(d["Model"]["SolutionDir"], "Test", model_name)
+    test_dir = os.path.join(solution_dir, "Test", model_name)
     os.makedirs(test_dir, exist_ok=True)
+
     
     real_test_json_path = os.path.join(test_dir, "Testing.json")
     

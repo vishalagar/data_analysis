@@ -53,12 +53,65 @@ class BatchFixRequest(BaseModel):
     total_issues_found: Optional[int] = None
     all_issues: List[FixItem]
 
+# NEW: Model for Training Request
+class TrainingRequest(BaseModel):
+    dataset_path: Optional[str] = None
+    hyperparameters: Optional[Dict[str, Any]] = None
+
 class UploadPathRequest(BaseModel):
     file_path: str
     ok_classes: Optional[List[str]] = None
     ng_classes: Optional[List[str]] = None
 
-# ... (omitted sections)
+
+@app.post("/api/train")
+def start_train(req: Optional[TrainingRequest] = None):
+    """
+    Step 3: Train model.
+    Optional JSON Body:
+    {
+      "dataset_path": "/path/to/custom/dataset",
+      "hyperparameters": { "lr": 0.005, "batch_size": 16, "epochs": 50 }
+    }
+    """
+    # 1. Check if already running
+    if training_state["status"] == "running": 
+        raise HTTPException(400, "Already running")
+    
+    # Extract params if provided
+    dataset_path = req.dataset_path if req else None
+    custom_params = req.hyperparameters if req else None
+
+    # 2. Update state to running
+    with state_lock: 
+        training_state.update({"status": "running", "result": None, "error": None})
+
+    try:
+        # 3. RUN TRAINING
+        res = run_automated_training(
+            custom_params=custom_params,
+            custom_dataset_path=dataset_path
+        )
+        
+        # 4. Success
+        with state_lock: 
+            training_state.update({"status": "completed", "result": res})
+        
+        return {"status": "completed", "result": res}
+
+    except Exception as e:
+        # 5. Failure
+        with state_lock: 
+            training_state.update({"status": "failed", "error": str(e)})
+        raise HTTPException(500, detail=f"Training failed: {str(e)}")
+
+@app.post("/api/inference")
+def inference():
+    """Runs inference on the validation/test set."""
+    result = run_inference()
+    if result["status"] == "error":
+        raise HTTPException(status_code=404, detail=result["message"])
+    return result
 
 @app.post("/api/upload")
 def upload(req: UploadPathRequest):

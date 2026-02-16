@@ -46,12 +46,13 @@ def get_data_paths():
 DL_PROCESS_WRAPPER_PATH = os.environ.get("DL_PROCESS_WRAPPER_PATH", r"C:\Program Files\Samsung Electro-Mechanics\SEM DL Kit\SEM_DL_Kit\Scripts\DLProcessWrapper2.4\DLProcessWrapper.exe")
 
 # Model Configuration Directory - Assuming it's inside the project root
-MODEL_CONFIG_DIR = r"E:\raghotham\plato_new\frontierr\sxc\Train\Model_1"
+MODEL_CONFIG_DIR = os.path.join(MODELS_DIR, "Model_1")
 os.makedirs(MODEL_CONFIG_DIR, exist_ok=True)
 
 MAX_CAPTION_LENGTH = 100
 TRAINING_JSON_PATH = os.path.join(MODEL_CONFIG_DIR, "Training.json")
 EVALUATION_JSON_PATH = os.path.join(MODEL_CONFIG_DIR, "Evaluation.json")
+TESTING_JSON_PATH = os.path.join(MODEL_CONFIG_DIR, "Testing.json")
 # TESTING_JSON_PATH moved to dynamic logic in training_service.py
 STATUS_FILE_PATH = os.path.join(MODEL_CONFIG_DIR, "Status.txt")
 

@@ -26,6 +26,7 @@ from app.services.data_service import CustomImageDataset, train_transform, val_t
 import subprocess
 import json
 import re
+import glob
 import shutil
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -33,6 +34,172 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # --- FIX 1: Initialize logger broadly here, but we will CHANGE the file handler per run ---
 # We point this to a generic 'startup.log' initially so we don't create empty training logs at boot.
 logger = setup_logger("pluto_trainer", os.path.join(LOGS_DIR, "startup.log"), mode='a')
+
+from app.config import (
+    MODELS_DIR, LOGS_DIR, get_data_paths, DATASET_ROOT,
+    DL_PROCESS_WRAPPER_PATH, TRAINING_JSON_PATH, EVALUATION_JSON_PATH, TESTING_JSON_PATH, 
+    STATUS_FILE_PATH, MODEL_CONFIG_DIR, BASE_DIR
+)
+
+# --- Dataset Scanning & JSON Update Logic ---
+def scan_dataset_and_update_configs():
+    """
+    Scans the dataset directory (Train/Val/Test) and updates 
+    Training.json and Testing.json with the current file lists and class definitions.
+    """
+    logger.info("Scanning dataset and updating JSON configurations...")
+    
+    paths = get_data_paths()
+    train_dir = paths['train']
+    val_dir = paths['val']
+    test_dir = paths['test']
+    
+    # 1. Identify Classes (Canonical List)
+    # We look at train_dir for the source of truth for classes
+    classes = []
+    if os.path.exists(train_dir):
+        classes = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
+    
+    if not classes:
+        logger.warning("No classes found in Train directory. Skipping JSON update.")
+        return False
+
+    # Map class name to index (0-based)
+    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)}
+    
+    # 2. Build classlst and classBin
+    # Check for user-defined class mapping metadata
+    meta_path = os.path.join(DATASET_ROOT, "dataset_meta.json")
+    user_ok_classes = set()
+    user_ng_classes = set()
+    
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+                user_ok_classes = {c.lower() for c in meta.get("ok_classes", [])}
+                user_ng_classes = {c.lower() for c in meta.get("ng_classes", [])}
+        except Exception as e:
+            logger.warning(f"Failed to read dataset metadata: {e}")
+
+    class_lst = []
+    class_bin = []
+    
+    for cls_name in classes:
+        # classlst entry
+        class_lst.append({
+            "ClassName": cls_name,
+            "iClassWeights": 1
+        })
+        
+        # classBin entry
+        c_lower = cls_name.lower()
+        
+        if c_lower in user_ok_classes:
+            bin_name = "OK"
+        elif c_lower in user_ng_classes:
+            bin_name = "NG"
+        else:
+            # Fallback Logic: If name is "OK" (case-insensitive) -> "OK", else "NG"
+            bin_name = "OK" if c_lower == "ok" else "NG"
+            
+        class_bin.append({
+            "classBinName": bin_name
+        })
+        
+    # 3. Helper to scan images
+    def scan_images(directory, dataset_id=1):
+        img_list = []
+        if not os.path.exists(directory):
+            return img_list
+            
+        for cls_name in classes:
+            cls_path = os.path.join(directory, cls_name)
+            if not os.path.exists(cls_path):
+                continue
+                
+            label_idx = class_to_idx.get(cls_name, 0)
+            
+            # Recursive scan for images
+            # Using glob for simplicity
+            pattern = os.path.join(cls_path, "**", "*")
+            files = glob.glob(pattern, recursive=True)
+            
+            for f_path in files:
+                if f_path.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg')):
+                    img_list.append({
+                        "ImageName": os.path.abspath(f_path),
+                        "Label": label_idx,
+                        "MaskPath": None,
+                        "Captions": None,
+                        "DatasetId": dataset_id,
+                        "CaptionsSentence": None,
+                        "TabularInfo": None
+                    })
+        return img_list
+
+    train_imgs = scan_images(train_dir)
+    val_imgs = scan_images(val_dir)
+    test_imgs = scan_images(test_dir)
+    
+    logger.info(f"Found {len(train_imgs)} train, {len(val_imgs)} val, {len(test_imgs)} test images.")
+    logger.info(f"Classes identified: {classes}")
+
+    # 4. Update Training.json
+    if os.path.exists(TRAINING_JSON_PATH):
+        try:
+            with open(TRAINING_JSON_PATH, 'r') as f:
+                t_data = json.load(f)
+            
+            # Update fields
+            t_data["classlst"] = class_lst
+            t_data["classBin"] = class_bin
+            t_data["trainImglst"] = train_imgs
+            t_data["ValImgList"] = val_imgs
+            
+            # Update Model counts
+            if "Model" in t_data:
+                t_data["Model"]["iTrainImgCount"] = len(train_imgs)
+                t_data["Model"]["iValidationImgCount"] = len(val_imgs)
+                t_data["Model"]["iTotalClasses"] = len(classes)
+                # t_data["Model"]["bIsValPresent"] = len(val_imgs) > 0 # Keep existing logic or force true?
+                
+            with open(TRAINING_JSON_PATH, 'w') as f:
+                json.dump(t_data, f, indent=2)
+            logger.info(f"Updated {TRAINING_JSON_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to update Training.json: {e}")
+            return False
+            
+    # 5. Update Testing.json
+    # Create it if it doesn't exist? Or only update if exists?
+    # User said "Testing.json with testImglst", implied it exists or should act like Training.json
+    target_test_json = TESTING_JSON_PATH
+    if not os.path.exists(target_test_json) and os.path.exists(TRAINING_JSON_PATH):
+         # Create from template if missing
+         shutil.copy(TRAINING_JSON_PATH, target_test_json)
+    
+    if os.path.exists(target_test_json):
+        try:
+            with open(target_test_json, 'r') as f:
+                test_data = json.load(f)
+            
+            test_data["classlst"] = class_lst
+            test_data["classBin"] = class_bin
+            test_data["testImglst"] = test_imgs
+            
+            if "Model" in test_data:
+                 test_data["Model"]["iTestImgCount"] = len(test_imgs)
+                 test_data["Model"]["iTotalClasses"] = len(classes)
+            
+            with open(target_test_json, 'w') as f:
+                json.dump(test_data, f, indent=2)
+            logger.info(f"Updated {target_test_json}")
+        except Exception as e:
+            logger.error(f"Failed to update Testing.json: {e}")
+            return False
+
+    return True
 
 
 # --- DL Process Wrapper Integration ---
@@ -99,15 +266,27 @@ def parse_status_log(log_path):
         
     return last_info
 
-def parse_confusion_matrix_file(file_path):
+def parse_confusion_matrix_file(file_path, ok_classes=None):
     """
     Parses ConfMatrixTest.txt or ConfMatrixEval.txt.
-    Calculates Miss Rate and Overkill Rate using OK class as good and other classes as not good.
+    Calculates Miss Rate and Overkill Rate using provided ok_classes as good 
+    and other classes (except Unknown) as not good (NG).
     Ignores Unknown class in calculations.
+    
+    Args:
+        file_path (str): Path to the confusion matrix file.
+        ok_classes (list): List of class names considered "OK" (Good). 
+                           If None, defaults to ["OK"].
     """
     if not os.path.exists(file_path):
         logger.warning(f"Confusion matrix file not found: {file_path}")
         return None
+
+    if ok_classes is None:
+        ok_classes = ["OK"]
+        
+    # Normalize ok_classes for easier comparison
+    ok_classes_norm = [c.lower() for c in ok_classes]
 
     results = {}
     total_metrics = {}
@@ -133,69 +312,74 @@ def parse_confusion_matrix_file(file_path):
             header_line = lines[matrix_start_idx + 1]
             headers = [h.strip() for h in header_line.split() if h.strip()]
             
-            ok_col_idx = -1
-            unknown_col_idx = -1
+            # Map headers to indices
+            header_map = {h.lower(): idx for idx, h in enumerate(headers)}
             
-            for idx, h in enumerate(headers):
-                if h.lower() == "ok":
-                    ok_col_idx = idx
-                elif h.lower() == "unknown":
-                    unknown_col_idx = idx
+            # Identify which columns correspond to OK classes
+            ok_col_indices = []
+            for h, idx in header_map.items():
+                if h in ok_classes_norm:
+                    ok_col_indices.append(idx)
             
-            if ok_col_idx != -1:
-                # Parse Rows
-                current_idx = matrix_start_idx + 2
-                while current_idx < len(lines):
-                    line = lines[current_idx].strip()
-                    if not line or "," in line: # End of matrix or start of CSV section
-                        break
-                        
-                    parts = [p.strip() for p in line.split() if p.strip()]
-                    if not parts:
-                        current_idx += 1
-                        continue
-                        
-                    row_label = parts[0]
-                    # Parse counts - skip label
-                    try:
-                        counts = [int(x) for x in parts[1:]]
-                    except ValueError:
-                        current_idx += 1 # unexpected format
-                        continue
-
-                    # Ignore Unknown Row
-                    if row_label.lower() == "unknown":
-                        current_idx += 1
-                        continue
-                        
-                    # Calculate row totals excluding Unknown column predictions
-                    row_total = sum(counts)
-                    unknown_pred_count = 0
-                    if unknown_col_idx != -1 and unknown_col_idx < len(counts):
-                        unknown_pred_count = counts[unknown_col_idx]
+            unknown_col_idx = header_map.get("unknown", -1)
+            
+            # Parse Rows
+            current_idx = matrix_start_idx + 2
+            while current_idx < len(lines):
+                line = lines[current_idx].strip()
+                if not line or "," in line: # End of matrix or start of CSV section
+                    break
                     
-                    valid_row_total = row_total - unknown_pred_count
-                    
-                    if row_label.lower() == "ok":
-                        # Valid Good Class
-                        # Overkill = Good predicted as Defect (Predicted != OK and != Unknown)
-                        pred_ok_count = counts[ok_col_idx] if ok_col_idx < len(counts) else 0
-                        
-                        # Overkill count = Total Valid - Predicted OK
-                        # (Anything not OK and not Unknown is a Defect prediction)
-                        row_overkill = valid_row_total - pred_ok_count
-                        
-                        overkill_count += row_overkill
-                        total_ok += valid_row_total
-                    else:
-                        # Valid Defect Class (None, ReTest, etc)
-                        # Miss = Defect predicted as OK
-                        pred_ok_count = counts[ok_col_idx] if ok_col_idx < len(counts) else 0
-                        
-                        miss_count += pred_ok_count
-                        total_defects += valid_row_total
-                        
+                parts = [p.strip() for p in line.split() if p.strip()]
+                if not parts:
                     current_idx += 1
+                    continue
+                    
+                row_label = parts[0]
+                # Parse counts - skip label
+                try:
+                    counts = [int(x) for x in parts[1:]]
+                except ValueError:
+                    current_idx += 1 # unexpected format
+                    continue
+
+                # Ignore Unknown Row
+                if row_label.lower() == "unknown":
+                    current_idx += 1
+                    continue
+                    
+                # Calculate row totals excluding Unknown column predictions
+                row_total = sum(counts)
+                unknown_pred_count = 0
+                if unknown_col_idx != -1 and unknown_col_idx < len(counts):
+                    unknown_pred_count = counts[unknown_col_idx]
+                
+                valid_row_total = row_total - unknown_pred_count
+                
+                # Determine if this row is an OK class or NG class
+                is_ok_row = row_label.lower() in ok_classes_norm
+                
+                # Calculate how many predictions were "OK"
+                pred_ok_total = 0
+                for idx in ok_col_indices:
+                    if idx < len(counts):
+                        pred_ok_total += counts[idx]
+                        
+                if is_ok_row:
+                    # Valid Good Class (OK)
+                    # Overkill = Good predicted as Defect (Predicted != OK and != Unknown)
+                    # So, Overkill = Valid Total - Predicted OK
+                    row_overkill = valid_row_total - pred_ok_total
+                    
+                    overkill_count += row_overkill
+                    total_ok += valid_row_total
+                else:
+                    # Valid Defect Class (NG)
+                    # Miss = Defect predicted as OK
+                    miss_count += pred_ok_total
+                    total_defects += valid_row_total
+                    
+                current_idx += 1
 
         # Calculate Rates
         miss_rate = (miss_count / total_defects * 100.0) if total_defects > 0 else 0.0
@@ -317,6 +501,11 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     """
     logger.info("Starting Automated Training via DLProcessWrapper")
     
+    # --- Step 0: Scan Dataset and Update JSONs ---
+    # This ensures Training.json and Testing.json have correct file lists and class info
+    if not scan_dataset_and_update_configs():
+         return {"status": "error", "message": "Failed to scan dataset and update configurations."}
+    
     # 0. Clean up stale files to ensure we don't read old data
     try:
         if os.path.exists(STATUS_FILE_PATH):
@@ -339,6 +528,29 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     # Update Training.json
     if not generate_config_json(training_json, mode="Train", params=params):
          return {"status": "error", "message": "Failed to generate Training.json"}
+    
+    # --- identify OK classes from training.json for metrics calculation ---
+    ok_classes = ["OK"] # default fallback
+    try:
+        with open(training_json, 'r') as f:
+            t_data = json.load(f)
+            class_lst = t_data.get("classlst", [])
+            class_bin = t_data.get("classBin", [])
+            
+            if class_lst and class_bin and len(class_lst) == len(class_bin):
+                found_ok = []
+                for i, c_item in enumerate(class_lst):
+                    c_name = c_item.get("ClassName")
+                    if i < len(class_bin):
+                         bin_name = class_bin[i].get("classBinName")
+                         if bin_name == "OK" and c_name:
+                             found_ok.append(c_name)
+                
+                if found_ok:
+                    ok_classes = found_ok
+                    logger.info(f"identified OK classes from config: {ok_classes}")
+    except Exception as e:
+        logger.warning(f"Failed to parse OK classes from training.json: {e}")
 
     # 3. Run Training
     logger.info("Launching Training Process...")
@@ -393,7 +605,7 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
          logger.error("Timeout waiting for Evaluation results.")
     
     # 6. Parse Eval Results
-    eval_results = parse_confusion_matrix_file(eval_matrix_path)
+    eval_results = parse_confusion_matrix_file(eval_matrix_path, ok_classes=ok_classes)
     
     # 7. Run Testing - ONLY after Eval success
     # We need to read the model name from Training.json to know the test directory
@@ -443,7 +655,7 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
         logger.error("Timeout waiting for Testing results.")
     
     # 8. Parse Test Results
-    test_results = parse_confusion_matrix_file(test_matrix_path)
+    test_results = parse_confusion_matrix_file(test_matrix_path, ok_classes=ok_classes)
     
     return {
         "status": "success",

@@ -108,10 +108,32 @@ def start_train(req: Optional[TrainingRequest] = None):
 @app.post("/api/inference")
 def inference():
     """Runs inference on the validation/test set."""
-    result = run_inference()
-    if result["status"] == "error":
-        raise HTTPException(status_code=404, detail=result["message"])
-    return result
+    # 1. Check if already running (Train or Inference)
+    if training_state["status"] == "running": 
+        raise HTTPException(status_code=400, detail="A process (Training or Inference) is already running")
+    
+    # 2. Update state to running
+    with state_lock: 
+        training_state.update({"status": "running", "result": None, "error": None})
+
+    try:
+        result = run_inference()
+        
+        # 3. Handle Result
+        if result["status"] == "error":
+             with state_lock:
+                 training_state.update({"status": "failed", "error": result["message"]})
+             raise HTTPException(status_code=500, detail=result["message"]) # 500 or 404? 500 implies execution failure.
+        
+        with state_lock:
+             training_state.update({"status": "completed", "result": result})
+             
+        return result
+
+    except Exception as e:
+        with state_lock:
+            training_state.update({"status": "failed", "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
 
 @app.post("/api/upload")
 def upload(req: UploadPathRequest):

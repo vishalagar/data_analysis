@@ -7,7 +7,8 @@ import pathlib
 BASE_DIR = pathlib.Path(__file__).parent.parent.resolve()
 
 DATASET_ROOT = os.path.join(BASE_DIR, "dataset")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
+MODELS_DIR = r"E:\raghotham\plato_new\frontierr\sxc\Train"
+# MODELS_DIR = os.path.join(BASE_DIR, "models")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 # Ensure base dirs exist
@@ -55,4 +56,3 @@ EVALUATION_JSON_PATH = os.path.join(MODEL_CONFIG_DIR, "Evaluation.json")
 TESTING_JSON_PATH = os.path.join(MODEL_CONFIG_DIR, "Testing.json")
 # TESTING_JSON_PATH moved to dynamic logic in training_service.py
 STATUS_FILE_PATH = os.path.join(MODEL_CONFIG_DIR, "Status.txt")
-

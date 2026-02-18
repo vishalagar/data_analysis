@@ -123,7 +123,7 @@ def scan_dataset_and_update_configs():
             files = glob.glob(pattern, recursive=True)
             
             for f_path in files:
-                if f_path.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg')):
+                if f_path.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')):
                     img_list.append({
                         "ImageName": os.path.abspath(f_path),
                         "Label": label_idx,
@@ -143,6 +143,20 @@ def scan_dataset_and_update_configs():
     logger.info(f"Classes identified: {classes}")
 
     # 4. Update Training.json
+    # Ensure Training.json exists by copying from template if needed
+    if not os.path.exists(TRAINING_JSON_PATH):
+        template_path = os.path.join(BASE_DIR, "training.json")
+        if os.path.exists(template_path):
+            try:
+                shutil.copy(template_path, TRAINING_JSON_PATH)
+                logger.info(f"Created {TRAINING_JSON_PATH} from template.")
+            except Exception as e:
+                logger.error(f"Failed to create Training.json from template: {e}")
+                return False
+        else:
+             logger.error(f"Training.json not found and no template at {template_path}")
+             return False
+
     if os.path.exists(TRAINING_JSON_PATH):
         try:
             with open(TRAINING_JSON_PATH, 'r') as f:
@@ -360,6 +374,7 @@ def parse_confusion_matrix_file(file_path, ok_classes=None):
                 try:
                     counts = [int(x) for x in parts[1:]]
                 except ValueError:
+                    logger.debug(f"Skipping line due to non-integer counts: {line}")
                     current_idx += 1 # unexpected format
                     continue
 
@@ -692,5 +707,156 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     }
 
 def run_inference():
-    # Placeholder for inference if needed, or redirect to test logic
-    return {"status": "info", "message": "Inference moved to Test flow via DLProcessWrapper"}
+    """
+    Runs (Evaluation -> Testing) sequence without Training.
+    This corresponds to the User's "Inference" request.
+    """
+    logger.info("Starting Inference (Evaluation & Testing) via DLProcessWrapper")
+    
+    # --- Step 0: Scan Dataset and Update JSONs ---
+    # Updates Training.json and default Testing.json with current file lists
+    if not scan_dataset_and_update_configs():
+         return {"status": "error", "message": "Failed to scan dataset and update configurations."}
+    
+    training_json = TRAINING_JSON_PATH
+    eval_json = EVALUATION_JSON_PATH
+    
+    # --- Identify OK classes from Training.json logic ---
+    ok_classes = ["OK"] 
+    try:
+        with open(training_json, 'r') as f:
+            t_data = json.load(f)
+            class_lst = t_data.get("classlst", [])
+            class_bin = t_data.get("classBin", [])
+            
+            if class_lst and class_bin and len(class_lst) == len(class_bin):
+                found_ok = []
+                for i, c_item in enumerate(class_lst):
+                    c_name = c_item.get("ClassName")
+                    if i < len(class_bin):
+                         bin_name = class_bin[i].get("classBinName")
+                         if bin_name == "OK" and c_name:
+                             found_ok.append(c_name)
+                
+                if found_ok:
+                    ok_classes = found_ok
+                    logger.info(f"identified OK classes from config: {ok_classes}")
+    except Exception as e:
+        logger.warning(f"Failed to parse OK classes from training.json: {e}")
+
+    # --- 1. Run Evaluation ---
+    
+    # Ensure Evaluation.json is up to date (copy from Training.json)
+    try:
+        shutil.copy(training_json, eval_json)
+        logger.info(f"Copied {training_json} to {eval_json} for Evaluation.")
+    except Exception as e:
+        logger.error(f"Failed to copy Training.json to Evaluation.json: {e}")
+        return {"status": "error", "message": "Failed to prepare Evaluation configuration."}
+
+    # Cleanup old Eval Matrix
+    eval_matrix_path = os.path.join(os.path.dirname(training_json), "ConfMatrixEvaluation.txt")
+    if os.path.exists(eval_matrix_path):
+        try: os.remove(eval_matrix_path)
+        except: pass
+    
+    # Ensure StopBufferTest.txt exists 
+    stop_buffer_path = os.path.join(os.path.dirname(training_json), "StopBufferTest.txt")
+    try:
+        with open(stop_buffer_path, 'w') as f:
+            f.write("1") 
+    except Exception as e:
+        logger.warning(f"Failed to create StopBufferTest.txt: {e}")
+
+    logger.info("Launching Evaluation Process...")
+    if not run_dl_process_wrapper(eval_json, "Evaluate"):
+        logger.error("Evaluation process failed execution.")
+        return {
+            "status": "error", 
+            "message": "Evaluation process failed execution"
+        }
+    
+    # Poll for Eval Matrix
+    if not poll_for_file(eval_matrix_path, timeout=600):
+         logger.error("Timeout waiting for Evaluation results.")
+    
+    # Parse Eval Results
+    eval_results = parse_confusion_matrix_file(eval_matrix_path, ok_classes=ok_classes)
+    
+    # --- 2. Run Testing ---
+    
+    # Determine Real Test JSON path (same logic as run_automated_training)
+    model_name = "Model_1" 
+    solution_dir = str(MODELS_DIR) 
+    
+    try:
+        with open(training_json, 'r') as f:
+            d = json.load(f)
+            if "Model" in d:
+                 if "name" in d["Model"]:
+                     model_name = d["Model"]["name"]
+                 if "SolutionDir" in d["Model"]:
+                     solution_dir = d["Model"]["SolutionDir"]
+    except:
+        logger.warning("Failed to parse Training.json for Test dir path. Using defaults.")
+
+    test_dir = os.path.join(solution_dir, "Test", model_name)
+    os.makedirs(test_dir, exist_ok=True)
+    
+    real_test_json_path = os.path.join(test_dir, "Testing.json")
+    
+    # Ensure Test Config is up to date.
+    # scan_dataset_and_update_configs updated the default TESTING_JSON_PATH (or tried to find real one).
+    # Does scan_dataset update the *real* path? 
+    # Yes: "Resolved real Testing.json path: ..." in scan_dataset_and_update_configs.
+    # So we should reuse that logic or blindly trust scan_dataset did it if steps match.
+    # Actually scan_dataset logic:
+    #   if os.path.exists(TRAINING_JSON_PATH): ... finds sol_dir ... updates target_test_json
+    # So scan_dataset SHOULD have updated `real_test_json_path` if Training.json existed and had info.
+    # We can trust that `real_test_json_path` is likely correct or at least what scan_dataset used.
+    
+    # However, scan_dataset logic for 'target_test_json' might differ slightly if we don't have exactly the same code.
+    # Let's ensure the file exists.
+    if not os.path.exists(real_test_json_path):
+        # Fallback: copy Training.json to it
+        try:
+            shutil.copy(training_json, real_test_json_path)
+        except:
+             pass
+
+    # Cleanup old Test Matrix
+    test_matrix_path = os.path.join(test_dir, "ConfMatrixTest.txt")
+    if os.path.exists(test_matrix_path):
+        try: os.remove(test_matrix_path)
+        except: pass
+    
+    # Ensure StopBufferTest.txt in Test Dir
+    stop_buffer_test_path = os.path.join(test_dir, "StopBufferTest.txt")
+    try:
+        with open(stop_buffer_test_path, 'w') as f:
+            f.write("1") 
+    except Exception as e:
+        logger.warning(f"Failed to create StopBufferTest.txt in Test dir: {e}")
+
+    logger.info(f"Launching Testing Process with config at: {real_test_json_path}")
+    if not run_dl_process_wrapper(real_test_json_path, "Test"):
+         logger.error("Testing process failed execution.")
+         return {
+            "status": "error", 
+            "message": "Testing process failed execution",
+            "eval_results": eval_results
+        }
+    
+    # Poll for Test Matrix
+    if not poll_for_file(test_matrix_path, timeout=600):
+        logger.error("Timeout waiting for Testing results.")
+    
+    # Parse Test Results
+    test_results = parse_confusion_matrix_file(test_matrix_path, ok_classes=ok_classes)
+    
+    return {
+        "status": "success",
+        "eval_results": eval_results,
+        "test_results": test_results,
+        "model_name": model_name
+    }

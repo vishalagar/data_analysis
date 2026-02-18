@@ -7,8 +7,8 @@ import pathlib
 BASE_DIR = pathlib.Path(__file__).parent.parent.resolve()
 
 DATASET_ROOT = os.path.join(BASE_DIR, "dataset")
-MODELS_DIR = r"E:\raghotham\plato_new\frontierr\sxc\Train"
-# MODELS_DIR = os.path.join(BASE_DIR, "models")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+# MODELS_DIR = r"E:\raghotham\plato_new\frontierr\sxc\Train"
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 # Ensure base dirs exist

@@ -173,7 +173,9 @@ def scan_dataset_and_update_configs():
                 t_data["Model"]["iTrainImgCount"] = len(train_imgs)
                 t_data["Model"]["iValidationImgCount"] = len(val_imgs)
                 t_data["Model"]["iTotalClasses"] = len(classes)
-                # t_data["Model"]["bIsValPresent"] = len(val_imgs) > 0 # Keep existing logic or force true?
+                # Ensure Paths are Local and Correct
+                t_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep 
+                t_data["Model"]["ModelDir"] = "Train" # Forever Train, as that's where model is saved
                 
             with open(TRAINING_JSON_PATH, 'w') as f:
                 json.dump(t_data, f, indent=2)
@@ -209,9 +211,22 @@ def scan_dataset_and_update_configs():
         logger.warning(f"Failed to resolve real Testing.json path, using fallback: {e}")
 
     # Create it if it doesn't exist? Or only update if exists?
-    if not os.path.exists(target_test_json) and os.path.exists(TRAINING_JSON_PATH):
-         # Create from template if missing
-         shutil.copy(TRAINING_JSON_PATH, target_test_json)
+    # Create it if it doesn't exist? Or only update if exists?
+    # User says Test and Eval formats are similar, unlike Training.
+    if not os.path.exists(target_test_json):
+         if os.path.exists(EVALUATION_JSON_PATH):
+             try:
+                 shutil.copy(EVALUATION_JSON_PATH, target_test_json)
+                 logger.info(f"Created {target_test_json} from Evaluation.json template.")
+             except Exception as e:
+                 logger.warning(f"Failed to create Testing.json from Evaluation.json: {e}")
+         elif os.path.exists(TRAINING_JSON_PATH):
+             # Fallback to Training only if really needed, but might be wrong format.
+             # Better to skip and warn? User said "Train is different". 
+             # Let's avoid copying Training.json if possible.
+             logger.warning(f"Testing.json missing at {target_test_json} and Evaluation.json not found. "
+                            "Skipping creation to avoid using Training.json (incompatible format).")
+    
     
     if os.path.exists(target_test_json):
         try:
@@ -221,16 +236,52 @@ def scan_dataset_and_update_configs():
             test_data["classlst"] = class_lst
             test_data["classBin"] = class_bin
             test_data["testImglst"] = test_imgs
+            test_data["trainImglst"] = []
+            test_data["ValImgList"] = []
             
             if "Model" in test_data:
                  test_data["Model"]["iTestImgCount"] = len(test_imgs)
                  test_data["Model"]["iTotalClasses"] = len(classes)
+                 test_data["Model"]["iTrainImgCount"] = 0
+                 test_data["Model"]["iValidationImgCount"] = 0
+                 test_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                 test_data["Model"]["ModelDir"] = "Train" # Point to Train dir where model exists
             
             with open(target_test_json, 'w') as f:
                 json.dump(test_data, f, indent=2)
             logger.info(f"Updated {target_test_json}")
         except Exception as e:
             logger.error(f"Failed to update Testing.json: {e}")
+            return False
+
+    # 6. Update Evaluation.json (In Place, preserving format)
+    if os.path.exists(EVALUATION_JSON_PATH):
+        try:
+            with open(EVALUATION_JSON_PATH, 'r') as f:
+                eval_data = json.load(f)
+            
+            # Update Images and Classes
+            eval_data["classlst"] = class_lst
+            eval_data["classBin"] = class_bin
+            eval_data["testImglst"] = test_imgs # Evaluation usually runs on Test, or Val? User snippet used testImglst & test images.
+            eval_data["trainImglst"] = []
+            eval_data["ValImgList"] = []
+            
+            if "Model" in eval_data:
+                 eval_data["Model"]["iTestImgCount"] = len(test_imgs)
+                 eval_data["Model"]["iTotalClasses"] = len(classes)
+                 eval_data["Model"]["iTrainImgCount"] = 0
+                 eval_data["Model"]["iValidationImgCount"] = 0
+                 eval_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                 eval_data["Model"]["ModelDir"] = "Train"
+                 
+            with open(EVALUATION_JSON_PATH, 'w') as f:
+                json.dump(eval_data, f, indent=2)
+            logger.info(f"Updated {EVALUATION_JSON_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to update Evaluation.json: {e}")
+            # Don't return False here? Evaluation is secondary to Training config? 
+            # Better to return False if it fails to ensure consistency.
             return False
 
     return True
@@ -610,6 +661,24 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     # 5. Run Evaluation -- ONLY after training success
     
     # Prepare Evaluation Config
+    # Update Evaluation.json IN PLACE to ensure it points to the correct model
+    if os.path.exists(eval_json):
+        try:
+            with open(eval_json, 'r') as f:
+                e_data = json.load(f)
+            
+            # Update Model Paths only
+            if "Model" in e_data:
+                e_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                e_data["Model"]["ModelDir"] = "Train"
+                # Keep other fields as is, respecting user's "different format"
+                
+            with open(eval_json, 'w') as f:
+                json.dump(e_data, f, indent=2)
+            logger.info(f"Updated {eval_json} for Training flow.")
+        except Exception as e:
+             logger.warning(f"Failed to update Evaluation.json in training flow: {e}")
+    
     # shutil.copy(training_json, eval_json)
 
     # Cleanup old Eval Matrix if exists
@@ -664,7 +733,23 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
     
     real_test_json_path = os.path.join(test_dir, "Testing.json")
     
-    # Copy training config to this new location for Testing
+    # Copy training config to this new location for Testing -> NO, User says different format.
+    # Update Testing.json IN PLACE
+    if os.path.exists(real_test_json_path):
+        try:
+            with open(real_test_json_path, 'r') as f:
+                t_data = json.load(f)
+            
+            if "Model" in t_data:
+                t_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                t_data["Model"]["ModelDir"] = "Train"
+                
+            with open(real_test_json_path, 'w') as f:
+                json.dump(t_data, f, indent=2)
+            logger.info(f"Updated {real_test_json_path} for Training flow.")
+        except Exception as e:
+            logger.warning(f"Failed to update Testing.json in training flow: {e}")
+            
     # shutil.copy(training_json, real_test_json_path)
     
     # Cleanup old Test Matrix if exists
@@ -715,44 +800,119 @@ def run_inference():
     
     # --- Step 0: Scan Dataset and Update JSONs ---
     # Updates Training.json and default Testing.json with current file lists
+    # This also populates the file lists in memory if we need them, but 
+    # scan_dataset_and_update_configs returns True/False.
+    # We need the image lists. Let's re-scan or rely on the JSONs being updated.
+    # scan_dataset_and_update_configs updates Testing.json! But we need to update Evaluation.json too.
     if not scan_dataset_and_update_configs():
          return {"status": "error", "message": "Failed to scan dataset and update configurations."}
     
-    training_json = TRAINING_JSON_PATH
-    eval_json = EVALUATION_JSON_PATH
+    # We need to know where the model is.
+    # Based on User input: ModelDir = "Train", SolutionDir = MODELS_DIR
+    model_dir_name = "Train"
+    solution_dir = str(MODELS_DIR) + os.sep
+
+    # Get Test Images (we need to populate Evaluation.json with them)
+    # scan_dataset_and_update_configs wrote them to Testing.json, maybe we can read from there?
+    # Or just re-scan. Let's read from Testing.json since it was just updated.
     
-    # --- Identify OK classes from Training.json logic ---
-    ok_classes = ["OK"] 
-    try:
-        with open(training_json, 'r') as f:
-            t_data = json.load(f)
-            class_lst = t_data.get("classlst", [])
-            class_bin = t_data.get("classBin", [])
-            
-            if class_lst and class_bin and len(class_lst) == len(class_bin):
-                found_ok = []
-                for i, c_item in enumerate(class_lst):
-                    c_name = c_item.get("ClassName")
-                    if i < len(class_bin):
-                         bin_name = class_bin[i].get("classBinName")
-                         if bin_name == "OK" and c_name:
-                             found_ok.append(c_name)
-                
-                if found_ok:
-                    ok_classes = found_ok
-                    logger.info(f"identified OK classes from config: {ok_classes}")
-    except Exception as e:
-        logger.warning(f"Failed to parse OK classes from training.json: {e}")
+    # Resolve Testing.json path (same logic as scan_dataset)
+    target_test_json = TESTING_JSON_PATH
+    t_data_for_paths = {}
+    
+    # Try to find real Testing.json if it exists (it should have been created/updated by scan_dataset)
+    # We'll use the one scan_dataset used.
+    # But wait, scan_dataset logic for 'real' path depends on Training.json content.
+    # Let's assume scan_dataset did its job and updated the Testing.json at target_test_json 
+    # OR at the specific Model path.
+    # Let's try to locate the most likely Testing.json to get the image list.
+    
+    test_imgs = []
+    classes = []
+    
+    # Read Training.json to find model name and get context
+    training_json = TRAINING_JSON_PATH
+    if os.path.exists(training_json):
+        try:
+            with open(training_json, 'r') as f:
+                t_data = json.load(f)
+                if "Model" in t_data:
+                     # Check if scan_dataset updated SolutionDir/ModelDir in Training.json 
+                     # (it does in my previous edit)
+                     pass
+        except: pass
+
+    # We need the test images list. 
+    # Let's re-scan test dir to be safe and independent.
+    paths = get_data_paths()
+    test_dir_path = paths['test']
+    
+    # Quick scan for classes (needed for label indexing)
+    train_dir = paths['train']
+    if os.path.exists(train_dir):
+        classes = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
+    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)}
+
+    # Helper scan
+    def scan_imgs_local(d):
+        imgs = []
+        if not os.path.exists(d): return imgs
+        for c in classes:
+            cp = os.path.join(d, c)
+            if not os.path.exists(cp): continue
+            lbl = class_to_idx.get(c, 0)
+            pat = os.path.join(cp, "**", "*")
+            files = glob.glob(pat, recursive=True)
+            for fp in files:
+                if fp.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')):
+                    imgs.append({
+                        "ImageName": os.path.abspath(fp),
+                        "Label": lbl,
+                        "MaskPath": "",  # Empty as per user snippet
+                        "Captions": None,
+                        "DatasetId": 1,
+                        "CaptionsSentence": None,
+                        "TabularInfo": None
+                    })
+        return imgs
+
+    test_imgs = scan_imgs_local(test_dir_path)
+    logger.info(f"Scanned {len(test_imgs)} test images for inference.")
 
     # --- 1. Run Evaluation ---
+    eval_json = EVALUATION_JSON_PATH
     
-    # Ensure Evaluation.json is up to date (copy from Training.json)
+    # Update Evaluation.json IN PLACE
+    if not os.path.exists(eval_json):
+        logger.error(f"Evaluation.json not found at {eval_json}. Cannot run evaluation.")
+        return {"status": "error", "message": "Evaluation configuration file missing."}
+
     try:
-        shutil.copy(training_json, eval_json)
-        logger.info(f"Copied {training_json} to {eval_json} for Evaluation.")
+        with open(eval_json, 'r') as f:
+            e_data = json.load(f)
+        
+        # Update Model Paths
+        if "Model" in e_data:
+            e_data["Model"]["SolutionDir"] = solution_dir
+            e_data["Model"]["ModelDir"] = model_dir_name # "Train"
+            e_data["Model"]["iTestImgCount"] = len(test_imgs)
+            e_data["Model"]["iTotalClasses"] = len(classes)
+            e_data["Model"]["iTrainImgCount"] = 0
+            e_data["Model"]["iValidationImgCount"] = 0
+        
+        # Update Image List - User snippet shows Evaluation using 'testImglst'
+        e_data["testImglst"] = test_imgs
+        e_data["trainImglst"] = []
+        e_data["ValImgList"] = []
+        # e_data["ValImgList"] = [] # formatting in user snippet had this empty
+        
+        with open(eval_json, 'w') as f:
+            json.dump(e_data, f, indent=2)
+        logger.info(f"Updated {eval_json} for Inference.")
+        
     except Exception as e:
-        logger.error(f"Failed to copy Training.json to Evaluation.json: {e}")
-        return {"status": "error", "message": "Failed to prepare Evaluation configuration."}
+        logger.error(f"Failed to update Evaluation.json: {e}")
+        return {"status": "error", "message": "Failed to update Evaluation configuration."}
 
     # Cleanup old Eval Matrix
     eval_matrix_path = os.path.join(os.path.dirname(training_json), "ConfMatrixEvaluation.txt")
@@ -781,57 +941,89 @@ def run_inference():
          logger.error("Timeout waiting for Evaluation results.")
     
     # Parse Eval Results
+    # Identify OK classes logic (reused)
+    ok_classes = ["OK"] 
+    # ... (same logic as before to find ok_classes from Training.json or hardcoded) ...
+    # Simplified: check classes list or Training.json
+    # We can try to read Training.json again or just rely on default.
+    try:
+        with open(training_json, 'r') as f:
+            t_data = json.load(f)
+            class_lst = t_data.get("classlst", [])
+            class_bin = t_data.get("classBin", [])
+            if class_lst and class_bin:
+                found_ok = [c.get("ClassName") for i, c in enumerate(class_lst) 
+                            if i < len(class_bin) and class_bin[i].get("classBinName") == "OK"]
+                if found_ok: ok_classes = found_ok
+    except: pass
+
     eval_results = parse_confusion_matrix_file(eval_matrix_path, ok_classes=ok_classes)
     
     # --- 2. Run Testing ---
     
-    # Determine Real Test JSON path (same logic as run_automated_training)
-    model_name = "Model_1" 
-    solution_dir = str(MODELS_DIR) 
+    # We update Testing.json IN PLACE
+    # Note: scan_dataset_and_update_configs might have already updated a 'Testing.json' 
+    # but we need to ensure it's the right one and has the right ModelDir.
     
+    # Resolve Real Test JSON Path
+    model_name = "Model_1"
     try:
-        with open(training_json, 'r') as f:
-            d = json.load(f)
-            if "Model" in d:
-                 if "name" in d["Model"]:
-                     model_name = d["Model"]["name"]
-                 if "SolutionDir" in d["Model"]:
-                     solution_dir = d["Model"]["SolutionDir"]
-    except:
-        logger.warning("Failed to parse Training.json for Test dir path. Using defaults.")
-
-    test_dir = os.path.join(solution_dir, "Test", model_name)
-    os.makedirs(test_dir, exist_ok=True)
+         with open(training_json, 'r') as f:
+            t_data = json.load(f)
+            if "Model" in t_data:
+                model_name = t_data["Model"].get("name", "Model_1")
+    except: pass
     
-    real_test_json_path = os.path.join(test_dir, "Testing.json")
+    # Construct path: SolutionDir/Test/ModelName/Testing.json -> This is where Scan Dataset puts it?
+    # Actually scan_dataset puts it in `sol_dir/Test/model_name/Testing.json`.
+    # Let's use that path.
+    test_dir_real = os.path.join(MODELS_DIR, "Test", model_name)
+    os.makedirs(test_dir_real, exist_ok=True)
+    real_test_json_path = os.path.join(test_dir_real, "Testing.json")
     
-    # Ensure Test Config is up to date.
-    # scan_dataset_and_update_configs updated the default TESTING_JSON_PATH (or tried to find real one).
-    # Does scan_dataset update the *real* path? 
-    # Yes: "Resolved real Testing.json path: ..." in scan_dataset_and_update_configs.
-    # So we should reuse that logic or blindly trust scan_dataset did it if steps match.
-    # Actually scan_dataset logic:
-    #   if os.path.exists(TRAINING_JSON_PATH): ... finds sol_dir ... updates target_test_json
-    # So scan_dataset SHOULD have updated `real_test_json_path` if Training.json existed and had info.
-    # We can trust that `real_test_json_path` is likely correct or at least what scan_dataset used.
-    
-    # However, scan_dataset logic for 'target_test_json' might differ slightly if we don't have exactly the same code.
-    # Let's ensure the file exists.
-    if not os.path.exists(real_test_json_path):
-        # Fallback: copy Training.json to it
+    # If it doesn't exist, check default TESTING_JSON_PATH
+    if not os.path.exists(real_test_json_path) and os.path.exists(TESTING_JSON_PATH):
         try:
-            shutil.copy(training_json, real_test_json_path)
-        except:
-             pass
+             shutil.copy(TESTING_JSON_PATH, real_test_json_path)
+        except: pass
+        
+    if not os.path.exists(real_test_json_path):
+         logger.error("Testing.json not found and could not be created.")
+         return {"status": "error", "message": "Testing configuration missing."}
+         
+    # Update Testing.json
+    try:
+        with open(real_test_json_path, 'r') as f:
+            test_data = json.load(f)
+            
+        if "Model" in test_data:
+            test_data["Model"]["SolutionDir"] = solution_dir
+            test_data["Model"]["ModelDir"] = model_dir_name # "Train"
+            test_data["Model"]["iTestImgCount"] = len(test_imgs)
+            test_data["Model"]["iTotalClasses"] = len(classes)
+            test_data["Model"]["iTrainImgCount"] = 0
+            test_data["Model"]["iValidationImgCount"] = 0
+            
+        test_data["testImglst"] = test_imgs
+        test_data["trainImglst"] = []
+        test_data["ValImgList"] = []
+        
+        with open(real_test_json_path, 'w') as f:
+             json.dump(test_data, f, indent=2)
+        logger.info(f"Updated {real_test_json_path} for Inference.")
+             
+    except Exception as e:
+         logger.error(f"Failed to update Testing.json: {e}")
+         return {"status": "error", "message": "Failed to update Testing configuration."}
 
     # Cleanup old Test Matrix
-    test_matrix_path = os.path.join(test_dir, "ConfMatrixTest.txt")
+    test_matrix_path = os.path.join(test_dir_real, "ConfMatrixTest.txt")
     if os.path.exists(test_matrix_path):
         try: os.remove(test_matrix_path)
         except: pass
     
     # Ensure StopBufferTest.txt in Test Dir
-    stop_buffer_test_path = os.path.join(test_dir, "StopBufferTest.txt")
+    stop_buffer_test_path = os.path.join(test_dir_real, "StopBufferTest.txt")
     try:
         with open(stop_buffer_test_path, 'w') as f:
             f.write("1") 

@@ -244,8 +244,9 @@ def scan_dataset_and_update_configs():
                  test_data["Model"]["iTotalClasses"] = len(classes)
                  test_data["Model"]["iTrainImgCount"] = 0
                  test_data["Model"]["iValidationImgCount"] = 0
-                 test_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
-                 test_data["Model"]["ModelDir"] = "Train" # Point to Train dir where model exists
+                 # Don't update SolutionDir as requested
+                 # test_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                 # test_data["Model"]["ModelDir"] = "Train"
             
             with open(target_test_json, 'w') as f:
                 json.dump(test_data, f, indent=2)
@@ -267,13 +268,18 @@ def scan_dataset_and_update_configs():
             eval_data["trainImglst"] = []
             eval_data["ValImgList"] = []
             
+            eval_data["valImgList"] = []
+            
             if "Model" in eval_data:
-                 eval_data["Model"]["iTestImgCount"] = len(test_imgs)
+                 # User Request: Update iTrainImgCount instead of iTestImgCount in Evaluation.json
+                 # Even though we use testImglst.
+                 eval_data["Model"]["iTrainImgCount"] = len(test_imgs) 
+                 eval_data["Model"]["iTestImgCount"] = 0 
                  eval_data["Model"]["iTotalClasses"] = len(classes)
-                 eval_data["Model"]["iTrainImgCount"] = 0
                  eval_data["Model"]["iValidationImgCount"] = 0
-                 eval_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
-                 eval_data["Model"]["ModelDir"] = "Train"
+                 # Don't update SolutionDir as requested
+                 # eval_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                 # eval_data["Model"]["ModelDir"] = "Train"
                  
             with open(EVALUATION_JSON_PATH, 'w') as f:
                 json.dump(eval_data, f, indent=2)
@@ -669,9 +675,11 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
             
             # Update Model Paths only
             if "Model" in e_data:
-                e_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
-                e_data["Model"]["ModelDir"] = "Train"
+                # Don't update SolutionDir as requested
+                # e_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                # e_data["Model"]["ModelDir"] = "Train"
                 # Keep other fields as is, respecting user's "different format"
+                pass
                 
             with open(eval_json, 'w') as f:
                 json.dump(e_data, f, indent=2)
@@ -741,8 +749,10 @@ def run_automated_training(full_epochs=1, custom_params=None, custom_dataset_pat
                 t_data = json.load(f)
             
             if "Model" in t_data:
-                t_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
-                t_data["Model"]["ModelDir"] = "Train"
+                # Don't update SolutionDir as requested
+                # t_data["Model"]["SolutionDir"] = str(MODELS_DIR) + os.sep
+                # t_data["Model"]["ModelDir"] = "Train"
+                pass
                 
             with open(real_test_json_path, 'w') as f:
                 json.dump(t_data, f, indent=2)
@@ -893,11 +903,14 @@ def run_inference():
         
         # Update Model Paths
         if "Model" in e_data:
-            e_data["Model"]["SolutionDir"] = solution_dir
-            e_data["Model"]["ModelDir"] = model_dir_name # "Train"
-            e_data["Model"]["iTestImgCount"] = len(test_imgs)
+            # Don't update SolutionDir as requested
+            # e_data["Model"]["SolutionDir"] = solution_dir
+            # e_data["Model"]["ModelDir"] = model_dir_name # "Train"
+            
+            # User Request: Update iTrainImgCount instead of iTestImgCount in Evaluation.json
+            e_data["Model"]["iTrainImgCount"] = len(test_imgs)
+            e_data["Model"]["iTestImgCount"] = 0
             e_data["Model"]["iTotalClasses"] = len(classes)
-            e_data["Model"]["iTrainImgCount"] = 0
             e_data["Model"]["iValidationImgCount"] = 0
         
         # Update Image List - User snippet shows Evaluation using 'testImglst'
@@ -997,8 +1010,10 @@ def run_inference():
             test_data = json.load(f)
             
         if "Model" in test_data:
-            test_data["Model"]["SolutionDir"] = solution_dir
-            test_data["Model"]["ModelDir"] = model_dir_name # "Train"
+            # Don't update SolutionDir as requested
+            # test_data["Model"]["SolutionDir"] = solution_dir
+            # test_data["Model"]["ModelDir"] = model_dir_name # "Train"
+            
             test_data["Model"]["iTestImgCount"] = len(test_imgs)
             test_data["Model"]["iTotalClasses"] = len(classes)
             test_data["Model"]["iTrainImgCount"] = 0

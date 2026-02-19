@@ -15,7 +15,7 @@ import threading
 from app.config import BASE_DIR, MODELS_DIR, get_data_paths, DATASET_ROOT
 from app.services.agent_service import analyze_situation_and_decide
 from app.services.data_service import apply_fix, get_dataset_stats
-from app.services.training_service import run_automated_training, run_inference
+from app.services.training_service import run_automated_training, run_inference, create_new_model_version
 
 app = FastAPI(title="AutoML Agent (n8n)")
 
@@ -167,12 +167,18 @@ def upload(req: UploadPathRequest):
                     json.dump(meta_data, f, indent=2)
             except Exception as e:
                 print(f"Failed to save dataset metadata: {e}") # Non-critical failure
+        
+        # --- Create New Model Version ---
+        # User requested: "Only when they upload new dataset only that time it should create new model folder."
+        new_model_name, new_model_dir = create_new_model_version()
 
         return {
             "status": "success", 
-            "message": f"Dataset extracted from {req.file_path}",
+            "message": f"Dataset extracted from {req.file_path}. Created new model version: {new_model_name}",
             "files_extracted": len(z.namelist()),
-            "meta_saved": bool(req.ok_classes or req.ng_classes)
+            "meta_saved": bool(req.ok_classes or req.ng_classes),
+            "new_model_version": new_model_name,
+            "new_model_dir": new_model_dir
         }
 
     except zipfile.BadZipFile:
